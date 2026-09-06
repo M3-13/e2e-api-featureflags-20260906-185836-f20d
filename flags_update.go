@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"unicode/utf8"
 )
 
 const maxBodyBytes = 1 << 20 // 1 MiB
@@ -51,6 +52,10 @@ func (s *server) handleUpdateFlag(w http.ResponseWriter, r *http.Request) {
 		existing.Enabled = *req.Enabled
 	}
 	if req.Description != nil {
+		if utf8.RuneCountInString(*req.Description) > 4096 {
+			writeError(w, http.StatusBadRequest, "description must not exceed 4096 characters")
+			return
+		}
 		existing.Description = *req.Description
 	}
 	if req.RolloutPercent != nil {
@@ -61,7 +66,10 @@ func (s *server) handleUpdateFlag(w http.ResponseWriter, r *http.Request) {
 		existing.RolloutPercent = *req.RolloutPercent
 	}
 
-	s.store.Update(key, existing)
+	if !s.store.UpdateIfExists(key, existing) {
+		writeError(w, http.StatusNotFound, "flag not found")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]Flag{"flag": existing})
 }
 

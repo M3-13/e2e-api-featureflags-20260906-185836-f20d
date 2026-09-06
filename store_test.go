@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -87,4 +88,35 @@ func TestStoreConcurrentAccess(t *testing.T) {
 		}(key)
 	}
 	wg.Wait()
+}
+
+func TestStoreMaxFlags(t *testing.T) {
+	s := NewStore()
+	for i := 0; i < maxFlags; i++ {
+		if err := s.Create(Flag{Key: fmt.Sprintf("k%d", i)}); err != nil {
+			t.Fatalf("create %d: unexpected error: %v", i, err)
+		}
+	}
+	if err := s.Create(Flag{Key: "overflow"}); !errors.Is(err, errMaxFlags) {
+		t.Fatalf("expected errMaxFlags, got %v", err)
+	}
+}
+
+func TestUpdateIfExistsUnknownKey(t *testing.T) {
+	s := NewStore()
+	if s.UpdateIfExists("missing", Flag{Key: "missing"}) {
+		t.Fatal("expected UpdateIfExists on unknown key to return false")
+	}
+}
+
+func TestUpdateIfExistsExistingKey(t *testing.T) {
+	s := NewStore()
+	_ = s.Create(Flag{Key: "a", Enabled: false})
+	if !s.UpdateIfExists("a", Flag{Key: "a", Enabled: true}) {
+		t.Fatal("expected UpdateIfExists on existing key to succeed")
+	}
+	got, _ := s.Get("a")
+	if !got.Enabled {
+		t.Fatalf("unexpected flag after UpdateIfExists: %+v", got)
+	}
 }
