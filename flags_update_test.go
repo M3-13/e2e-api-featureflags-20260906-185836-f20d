@@ -157,6 +157,18 @@ func TestUpdateFlagDescriptionTooLongReturns400(t *testing.T) {
 	}
 }
 
+func TestUpdateFlagKeyTooLongReturns400(t *testing.T) {
+	_, handler := newUpdateTestServer()
+	key := strings.Repeat("k", 257)
+	req := httptest.NewRequest(http.MethodPut, "/flags/"+key, strings.NewReader(`{"enabled":true}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rec.Code)
+	}
+}
+
 func TestConcurrentDeleteAndUpdateIfExists(t *testing.T) {
 	s := NewStore()
 	_ = s.Create(Flag{Key: "myflag", Enabled: true})

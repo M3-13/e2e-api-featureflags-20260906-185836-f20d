@@ -18,6 +18,10 @@ type updateFlagRequest struct {
 
 func (s *server) handleUpdateFlag(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
+	if len(key) > 256 {
+		writeError(w, http.StatusBadRequest, "key must not exceed 256 bytes")
+		return
+	}
 
 	existing, ok := s.store.Get(key)
 	if !ok {
