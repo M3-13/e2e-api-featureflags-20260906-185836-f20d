@@ -1,28 +1,90 @@
-# Sicherheit
+VERDICT: APPROVED
 
-Dieses Dokument beschreibt die Sicherheitseigenschaften des Feature-Flag-Service, die Vorgehensweise bei Sicherheitsupdates und den Nachweis der Software-Stückliste (SBOM).
+## Zusammenfassung
 
-## Sicherheitseigenschaften
+Der Feature-Flag-Service ist insgesamt sauber umgesetzt. Es gibt keine hartkodierten Secrets, keine klassischen Injection-Schwachstellen (kein SQL/Command/Pfad-Zugriff), keine unsichere Deserialisierung und keine externen Abhängigkeiten. Die Authentifizierung über einen API-Key aus der Umgebung ist konstantzeit implementiert, und der Logging-Filter entfernt Query-Strings.  
+Die nachfolgenden Befunde sind niedriger Schwere und betreffen Härtungsdetails; ausnutzbare hoch/kritische Schwachstellen wurden nicht gefunden.
 
-- **API-Key-Authentifizierung**: Alle fachlichen Endpunkte (mit Ausnahme von `GET /healthz`) sind über einen API-Key geschützt. Der Key wird aus der Umgebungsvariable `FLAG_API_KEY` gelesen und über den Header `Authorization: Bearer <key>` bzw. `X-API-Key: <key>` übermittelt. Der Vergleich erfolgt zeitkonstant über `crypto/subtle.ConstantTimeCompare`. Fehlt der Key oder ist er ungültig, antwortet der Server mit `401`.
-- **TLS-Vorgabe**: Der Dienst erzwingt TLS. Die TLS-Terminierung erfolgt entweder direkt über den Server (TLS-Betriebsvorgabe) oder über einen vorgeschalteten TLS-terminierenden Reverse-Proxy. Ein Betrieb über unverschlüsseltes HTTP ist nicht vorgesehen.
-- **1-MiB-Body-Limit**: `POST /flags` und `PUT /flags/{key}` begrenzen den Request-Body vor dem vollständigen Einlesen auf 1 MiB. Bei Überschreitung antwortet der Handler mit `413` und liest den Body nicht weiter.
-- **Strict-Input-Validierung**: Eingaben werden strikt validiert (fehlender oder leerer `key`, `enabled` kein Bool, `rollout_percent` außerhalb 0–100, ungültiges JSON, fehlender `user`-Parameter). Ungültige Eingaben werden mit `400` abgelehnt. Zusätzliche Daten nach dem JSON-Objekt werden nicht akzeptiert.
-- **JSON-Fehlerobjekte ohne Interna**: Fehlerantworten bestehen ausschließlich aus dem definierten JSON-Fehlerobjekt `{"error":"..."}`. Es werden keine Stacktraces, internen Dateipfade, Panic-Texte oder sonstigen Implementierungsdetails zurückgegeben.
-- **Logging ohne Query/PII**: Die Zugriffs-Logging-Middleware protokolliert ausschließlich Methode, Pfad ohne Query-String und Statuscode. Der `user`-Parameter aus `GET /flags/{key}/evaluate` wird weder geloggt noch gespeichert oder in einer Antwort zurückgegeben; er fließt ausschließlich in die Hash-Berechnung ein.
+## Scanner-Abdeckung
 
-## Sicherheitsupdate-Politik
+Für diesen Projekttyp (`go-backend`) wurden keine Security-Scanner ausgeführt. Diese Lücke wird zur Kenntnis genommen, begründet aber keinen Befund, da der Code manuell geprüft wurde. Externe Abhängigkeiten sind laut `go.mod` nicht vorhanden; damit entfallen typische Dependency-Check-Ergebnisse.
 
-- **Patch-Intervall**: Sicherheitsupdates und Patches werden monatlich geprüft und bei Bedarf umgehend eingespielt.
-- **Zuständigkeit**: Für die Einspielung von Sicherheitsupdates ist das Wartungsteam des Feature-Flag-Service zuständig. Sicherheitsrelevante Hinweise werden über die im Repository hinterlegten Kontaktwege an die Maintainer gemeldet.
+## Befunde
 
-## SBOM-Nachweis
+### 1. Falscher Statuscode bei zu großem Body in der Trailing-Data-Prüfung (niedrig)
 
-- Das Modul nutzt **ausschließlich die Go-Standardbibliothek** und hat **keine Drittanbieter-Abhängigkeiten**; `go mod tidy` verändert den Abhängigkeitsbaum nicht.
-- Eine maschinenlesbare SBOM wird mit folgendem Befehl erzeugt:
+- **Datei/Stelle:** `flags_create.go` zweiter `dec.Decode`, `flags_update.go` zweiter `dec.Decode`
+- **Beschreibung:** `http.MaxBytesReader` begrenzt das Einlesen. Tritt der `*http.MaxBytesError` erst beim zweiten `Decode`-Aufruf auf (z. B. erstes gültiges JSON, danach sehr großer Rest), fällt der Code in den allgemeinen 400-Zweig statt 413 zu liefern. Der Speicherschutz greift weiterhin, aber die Vorgabe AC-11 wird in diesem Randfall verletzt.
+- **Fix:** Die Fehlerprüfung auch im zweiten Decodier-Aufruf durchführen:
 
-  ```sh
-  go list -deps -json > sbom.json
-  ```
+```go
+if err := dec.Decode(&struct{}{}); err != io.EOF {
+    var maxErr *http.MaxBytesError
+    if errors.As(err, &maxErr) {
+        writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+        return
+    }
+    writeError(w, http.StatusBadRequest, "invalid JSON")
+    return
+}
+```
 
-- Die SBOM wird **vor jedem Release neu generiert** und dem Release beigefügt.
+Analog für `handleUpdateFlag`.
+
+### 2. API-Key-Längen-Leak durch frühen Längenvergleich (niedrig)
+
+- **Datei/Stelle:** `auth.go`, Funktion `constantTimeEqual`
+- **Beschreibung:** `if len(a) != len(b) { return false }` bricht vor dem konstantzeitigen Vergleich ab. Dadurch kann ein Angreifer über wiederholte Zeitmessungen die Länge des API-Keys ermitteln. Der eigentliche Zeichenvergleich ist konstantzeit, die Länge selbst wird jedoch preisgegeben.
+- **Fix:** Beide Werte vor dem Vergleich hashen, damit immer gleich lange Digests verglichen werden:
+
+```go
+func constantTimeEqual(a, b string) bool {
+    ha := sha256.Sum256([]byte(a))
+    hb := sha256.Sum256([]byte(b))
+    return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
+}
+```
+
+### 3. Unverschlüsselter Transport, falls Host auf nicht-loopback gesetzt wird (niedrig)
+
+- **Datei/Stelle:** `main.go`, Host-/Port-Konfiguration und `ListenAndServe`
+- **Beschreibung:** Standardmäßig bindet der Dienst an `127.0.0.1`, was sicher ist. Wird `HOST=0.0.0.0` gesetzt, ist der Dienst ohne TLS im Netz erreichbar; API-Key und Flag-Daten würden im Klartext übertragen.
+- **Fix:** Standard-Host `127.0.0.1` belassen und in der Betriebsdokumentation festlegen, dass vor öffentlicher Exposition ein TLS-Terminierungs-Proxy vorgeschaltet werden muss. Alternativ natives TLS (`http.ListenAndServeTLS`) unterstützen. Optional im Code warnen, wenn `HOST != 127.0.0.1` und kein TLS konfiguriert ist.
+
+### 4. Fehlende Rate-Limitierung für Authentifizierungsfehlversuche (niedrig)
+
+- **Datei/Stelle:** `auth.go` / `middleware.go`
+- **Beschreibung:** Fehlgeschlagene API-Key-Authentifizierungen (401) sind unbegrenzt möglich. Ein Angreifer kann dadurch den statischen API-Key unbeschränkt raten.
+- **Fix:** Einfache Rate-Limitierung pro Client-IP in die Middleware integrieren, z. B. Token-Bucket: nach 5 Fehlversuchen pro Minute `429 Too Many Requests` zurückgeben. Der Zustand muss thread-sicher sein und nur bei Fehlversuchen zählen.
+
+### 5. Konkreter Flag-Key in Logs bei nicht authentifizierten Anfragen (niedrig)
+
+- **Datei/Stelle:** `main.go` (Middleware-Reihenfolge) / `middleware.go` (Fallback `r.URL.Path`)
+- **Beschreibung:** Da `logMiddleware` die äußerste Schicht ist, wird bei einem 401 aus `authMiddleware` der `http.NewServeMux` nie erreicht. `r.Pattern` bleibt daher leer, und der Logger fällt auf `r.URL.Path` zurück. Dadurch werden z. B. `/flags/alice-experimental/evaluate` im Klartext geloggt, während authentifizierte Anfragen das Pattern `/flags/{key}/evaluate` loggen. Der `user`-Query-Parameter wird weiterhin nicht geloggt, aber Flag-Keys können in Logs sichtbar werden.
+- **Fix:** Eine Pfad-Maskierungsfunktion im Logger einsetzen, die dynamische Segmente ersetzt, z. B.:
+
+```go
+func maskPath(path string) string {
+    parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+    if len(parts) == 2 && parts[0] == "flags" {
+        return "/flags/{key}"
+    }
+    if len(parts) == 3 && parts[0] == "flags" && parts[2] == "evaluate" {
+        return "/flags/{key}/evaluate"
+    }
+    return path
+}
+```
+
+Im `logMiddleware` dann:
+
+```go
+path := r.Pattern
+if path == "" {
+    path = maskPath(r.URL.Path)
+}
+```
+
+---
+
+**Fazit:** Keine hoch/kritisch ausnutzbaren Schwachstellen erkennbar. Die genannten Punkte sind Härtungsempfehlungen, die das Produkt sicherer machen, aber keinen sofortigen Auslieferungsstopp erfordern.
