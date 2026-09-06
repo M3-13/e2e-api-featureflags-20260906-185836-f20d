@@ -14,7 +14,7 @@ func jsonInt(v int) string {
 }
 
 func newTestHandler() http.Handler {
-	return newHandler(&server{store: NewStore()})
+	return withAuthHeader(newHandler(&server{store: NewStore()}))
 }
 
 func TestCreateFlagThenGet(t *testing.T) {
