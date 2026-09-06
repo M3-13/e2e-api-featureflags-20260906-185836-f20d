@@ -12,7 +12,7 @@ import (
 
 func newUpdateTestServer() (*server, http.Handler) {
 	srv := &server{store: NewStore()}
-	return srv, newHandler(srv)
+	return srv, withAuthHeader(newHandler(srv))
 }
 
 func TestUpdateFlagChangesFields(t *testing.T) {
