@@ -184,3 +184,35 @@ func TestCreateFlagDuplicateKey(t *testing.T) {
 		t.Fatal("expected duplicate create to return 409")
 	}
 }
+
+func TestCreateFlagTrailingData(t *testing.T) {
+	h := newTestHandler()
+	req := httptest.NewRequest(http.MethodPost, "/flags", strings.NewReader(`{"key":"a","enabled":true} {"key":"b"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestCreateFlagKeyTooLong(t *testing.T) {
+	h := newTestHandler()
+	key := strings.Repeat("k", 257)
+	req := httptest.NewRequest(http.MethodPost, "/flags", strings.NewReader(`{"key":"`+key+`","enabled":true}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestCreateFlagDescriptionTooLong(t *testing.T) {
+	h := newTestHandler()
+	desc := strings.Repeat("d", 4097)
+	req := httptest.NewRequest(http.MethodPost, "/flags", strings.NewReader(`{"key":"a","enabled":true,"description":"`+desc+`"}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}

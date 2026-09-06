@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -140,5 +141,51 @@ func TestDeleteFlagUnknownKeyReturns404(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected status 404, got %d", rec.Code)
+	}
+}
+
+func TestUpdateFlagDescriptionTooLongReturns400(t *testing.T) {
+	srv, handler := newUpdateTestServer()
+	_ = srv.store.Create(Flag{Key: "myflag"})
+	desc := strings.Repeat("d", 4097)
+	req := httptest.NewRequest(http.MethodPut, "/flags/myflag", strings.NewReader(`{"description":"`+desc+`"}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rec.Code)
+	}
+}
+
+func TestUpdateFlagKeyTooLongReturns400(t *testing.T) {
+	_, handler := newUpdateTestServer()
+	key := strings.Repeat("k", 257)
+	req := httptest.NewRequest(http.MethodPut, "/flags/"+key, strings.NewReader(`{"enabled":true}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d", rec.Code)
+	}
+}
+
+func TestConcurrentDeleteAndUpdateIfExists(t *testing.T) {
+	s := NewStore()
+	_ = s.Create(Flag{Key: "myflag", Enabled: true})
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		s.Delete("myflag")
+	}()
+	go func() {
+		defer wg.Done()
+		s.UpdateIfExists("myflag", Flag{Key: "myflag", Enabled: false, Description: "changed"})
+	}()
+	wg.Wait()
+
+	if _, ok := s.Get("myflag"); ok {
+		t.Fatal("expected flag to be deleted, not resurrected by UpdateIfExists")
 	}
 }

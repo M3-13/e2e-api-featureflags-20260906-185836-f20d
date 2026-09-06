@@ -17,7 +17,12 @@ type Store struct {
 	flags map[string]Flag
 }
 
-var errFlagExists = errors.New("flag already exists")
+const maxFlags = 10_000
+
+var (
+	errFlagExists = errors.New("flag already exists")
+	errMaxFlags   = errors.New("maximum number of flags reached")
+)
 
 func NewStore() *Store {
 	return &Store{flags: make(map[string]Flag)}
@@ -28,6 +33,9 @@ func (s *Store) Create(f Flag) error {
 	defer s.mu.Unlock()
 	if _, exists := s.flags[f.Key]; exists {
 		return errFlagExists
+	}
+	if len(s.flags) >= maxFlags {
+		return errMaxFlags
 	}
 	s.flags[f.Key] = f
 	return nil
@@ -56,6 +64,17 @@ func (s *Store) Update(key string, f Flag) bool {
 	if _, exists := s.flags[key]; !exists {
 		return false
 	}
+	s.flags[key] = f
+	return true
+}
+
+func (s *Store) UpdateIfExists(key string, f Flag) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.flags[key]; !exists {
+		return false
+	}
+	f.Key = key
 	s.flags[key] = f
 	return true
 }
